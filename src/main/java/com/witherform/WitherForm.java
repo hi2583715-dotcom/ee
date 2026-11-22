@@ -4,6 +4,7 @@ import com.mojang.brigadier.Command;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.ItemEvents;
 import net.minecraft.commands.Commands;
@@ -12,6 +13,7 @@ import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Style;
 import net.minecraft.network.protocol.game.ClientboundSetActionBarTextPacket;
 import net.minecraft.resources.Identifier;
@@ -26,6 +28,9 @@ import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySpawnReason;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.item.ItemStack;
@@ -52,6 +57,8 @@ import java.util.UUID;
  *  - creative-style flight
  *  - wither particle aura, wither immunity, light resistance
  *  - soul-fire wings + a crown of three flames (the Wither's three heads) on your body
+ *  - 15 hearts (30 max health) while the skull is in your offhand
+ *  - everything you hit (skulls, swords, arrows...) gets the Wither effect
  *  - right-click: fires 1 wither skull (0.45 s cooldown)
  *  - F (swap hands): fires 3 wither skulls (left, straight, right) (6 s cooldown)
  *    SHIFT + F still swaps hands normally.
@@ -66,6 +73,9 @@ public class WitherForm implements ModInitializer {
 	private static final double SKULL_SPEED = 1.4;
 	private static final float FLY_SPEED = 0.04f;         // vanilla creative = 0.05
 	private static final int ANIM_TICKS = 45;
+	private static final int WITHER_HIT_TICKS = 200;      // 10 s of Wither on everything you hit
+	private static final double EXTRA_HEALTH = 10.0;      // +5 hearts -> 15 hearts total
+	private static final Identifier HEALTH_ID = Identifier.fromNamespaceAndPath("witherform", "wither_form_health");
 
 	// ---- state ----
 	private static int tick = 0;
@@ -108,6 +118,18 @@ public class WitherForm implements ModInitializer {
 			return InteractionResult.FAIL; // main hand: never place it
 		});
 
+		// Everything you hit while in Wither form gets the Wither effect (skulls, melee, arrows, ...)
+		ServerLivingEntityEvents.AFTER_DAMAGE.register((entity, source, baseDamageTaken, damageTaken, blocked) -> {
+			if (blocked) {
+				return;
+			}
+			if (source.getEntity() instanceof ServerPlayer attacker
+					&& attacker != entity
+					&& isForm(attacker.getOffhandItem())) {
+				entity.addEffect(new MobEffectInstance(MobEffects.WITHER, WITHER_HIT_TICKS, 0), attacker);
+			}
+		});
+
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
 			tick++;
 			for (ServerPlayer p : server.getPlayerList().getPlayers()) {
@@ -133,8 +155,6 @@ public class WitherForm implements ModInitializer {
 		CompoundTag tag = new CompoundTag();
 		tag.putBoolean(TAG, true);
 		s.set(DataComponents.CUSTOM_DATA, CustomData.of(tag));
-		s.set(DataComponents.CUSTOM_NAME, gradientName("Wither Skull"));
-		s.set(DataComponents.ITEM_MODEL, Identifier.fromNamespaceAndPath("witherform", "wither_skull"));
 		s.set(DataComponents.LORE, new ItemLore(List.of(
 				(Component) Component.literal("Embrace the Wither")
 						.withStyle(Style.EMPTY.withColor(0x6b6b73).withItalic(true)),
@@ -147,7 +167,6 @@ public class WitherForm implements ModInitializer {
 						.withStyle(Style.EMPTY.withColor(0x7fd8ff).withItalic(false)),
 				(Component) Component.literal("Shift + F: swap hands")
 						.withStyle(Style.EMPTY.withColor(0x4a4a52).withItalic(false)))));
-		s.set(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true);
 		return s;
 	}
 
@@ -195,6 +214,7 @@ public class WitherForm implements ModInitializer {
 		UUID id = p.getUUID();
 		boolean has = isForm(p.getOffhandItem());
 		boolean active = ACTIVE.contains(id);
+		updateHealth(p, has);
 
 		if (has && !active) {
 			activate(p);
@@ -221,6 +241,25 @@ public class WitherForm implements ModInitializer {
 				ANIM_START.remove(id);
 			} else {
 				animationFrame(p, t);
+			}
+		}
+	}
+
+	/** +5 hearts (15 total) while the skull is in the offhand; removed again when it isn't. */
+	private static void updateHealth(ServerPlayer p, boolean on) {
+		AttributeInstance inst = p.getAttribute(Attributes.MAX_HEALTH);
+		if (inst == null) {
+			return;
+		}
+		boolean present = inst.getModifier(HEALTH_ID) != null;
+		if (on && !present) {
+			float before = p.getHealth() / p.getMaxHealth();
+			inst.addOrReplacePermanentModifier(new AttributeModifier(HEALTH_ID, EXTRA_HEALTH, AttributeModifier.Operation.ADD_VALUE));
+			p.setHealth(Math.min(p.getMaxHealth(), before * p.getMaxHealth()));   // keep the same % of health
+		} else if (!on && present) {
+			inst.removeModifier(HEALTH_ID);
+			if (p.getHealth() > p.getMaxHealth()) {
+				p.setHealth(p.getMaxHealth());
 			}
 		}
 	}
@@ -414,21 +453,13 @@ public class WitherForm implements ModInitializer {
 
 	private static EntityType<?> cachedSkullType;
 
-	/** Finds the wither skull entity type without depending on its exact field name. */
+	/** Finds the wither skull entity type by scanning the entity registry (independent of field names). */
 	private static EntityType<?> skullType() {
 		if (cachedSkullType == null) {
-			for (java.lang.reflect.Field f : EntityType.class.getFields()) {
-				if (f.getName().contains("WITHER") && f.getName().contains("SKULL")
-						&& java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
-					try {
-						Object o = f.get(null);
-						if (o instanceof EntityType<?> t) {
-							cachedSkullType = t;
-							break;
-						}
-					} catch (IllegalAccessException ignored) {
-						// try the next field
-					}
+			for (EntityType<?> t : BuiltInRegistries.ENTITY_TYPE) {
+				if (t.getDescriptionId().endsWith(".wither_skull")) {
+					cachedSkullType = t;
+					break;
 				}
 			}
 		}
@@ -444,6 +475,8 @@ public class WitherForm implements ModInitializer {
 
 		EntityType<?> skullType = skullType();
 		if (skullType == null) {
+			actionBar(p, Component.literal("Wither skull entity not found")
+					.withStyle(Style.EMPTY.withColor(0xff5555)));
 			return;
 		}
 
@@ -452,6 +485,8 @@ public class WitherForm implements ModInitializer {
 			Vec3 dir = look.yRot((float) Math.toRadians(deg)).normalize();
 			Entity skull = skullType.create(sl, EntitySpawnReason.TRIGGERED);
 			if (skull == null) {
+				actionBar(p, Component.literal("Could not spawn wither skull")
+						.withStyle(Style.EMPTY.withColor(0xff5555)));
 				continue;
 			}
 			skull.setPos(origin.x, origin.y, origin.z);
