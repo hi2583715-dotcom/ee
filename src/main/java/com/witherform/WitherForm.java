@@ -155,6 +155,7 @@ public class WitherForm implements ModInitializer {
 		CompoundTag tag = new CompoundTag();
 		tag.putBoolean(TAG, true);
 		s.set(DataComponents.CUSTOM_DATA, CustomData.of(tag));
+		s.set(DataComponents.CUSTOM_NAME, gradientName("Wither Skull"));
 		s.set(DataComponents.LORE, new ItemLore(List.of(
 				(Component) Component.literal("Embrace the Wither")
 						.withStyle(Style.EMPTY.withColor(0x6b6b73).withItalic(true)),
