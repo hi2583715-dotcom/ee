@@ -412,6 +412,29 @@ public class WitherForm implements ModInitializer {
 		shoot(p, new double[]{SPREAD_DEGREES, 0.0, -SPREAD_DEGREES});
 	}
 
+	private static EntityType<?> cachedSkullType;
+
+	/** Finds the wither skull entity type without depending on its exact field name. */
+	private static EntityType<?> skullType() {
+		if (cachedSkullType == null) {
+			for (java.lang.reflect.Field f : EntityType.class.getFields()) {
+				if (f.getName().contains("WITHER") && f.getName().contains("SKULL")
+						&& java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+					try {
+						Object o = f.get(null);
+						if (o instanceof EntityType<?> t) {
+							cachedSkullType = t;
+							break;
+						}
+					} catch (IllegalAccessException ignored) {
+						// try the next field
+					}
+				}
+			}
+		}
+		return cachedSkullType;
+	}
+
 	private static void shoot(ServerPlayer p, double[] angles) {
 		if (!(p.level() instanceof ServerLevel sl)) {
 			return;
@@ -419,7 +442,7 @@ public class WitherForm implements ModInitializer {
 		Vec3 look = p.getLookAngle();
 		Vec3 origin = p.getEyePosition().add(look.scale(1.2)).add(0, -0.25, 0);
 
-		EntityType<?> skullType = EntityType.byString("wither_skull").orElse(null);
+		EntityType<?> skullType = skullType();
 		if (skullType == null) {
 			return;
 		}
